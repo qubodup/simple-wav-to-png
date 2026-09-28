@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WAV Waveform Renderer</title>
+<style>
+  :root { color-scheme: dark; --bg:#111; --panel:#1b1b1b; --line:#303030; --text:#eee; --muted:#aaa; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px system-ui,-apple-system,Segoe UI,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:1100px; margin:0 auto; padding:24px; }
+  h1 { margin:0 0 18px; font-size:22px; }
+  .drop { border:1px dashed #555; border-radius:10px; padding:28px; text-align:center; cursor:pointer; background:#151515; }
+  .drop.drag { border-color:#aaa; background:#202020; }
+  .drop input { display:none; }
+  .controls { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin:18px 0; }
+  label { display:flex; flex-direction:column; gap:6px; color:var(--muted); }
+  select,input[type="number"],input[type="color"] { width:100%; min-height:36px; border:1px solid var(--line); border-radius:6px; background:#171717; color:var(--text); padding:7px 9px; }
+  input[type="color"] { padding:3px; }
+  .checks { display:flex; align-items:end; gap:10px; }
+  button { border:1px solid #555; background:#242424; color:#fff; border-radius:6px; padding:9px 13px; cursor:pointer; }
+  button:hover { background:#303030; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .status { color:var(--muted); min-height:20px; margin:8px 0 16px; }
+  .results { display:grid; gap:22px; }
+  .channel { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel); }
+  .channel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px; }
+  .channel-title { font-weight:600; }
+  canvas { display:block; width:100%; height:auto; background:#000; border-radius:3px; }
+  .small { font-size:12px; color:var(--muted); }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>WAV Waveform Renderer</h1>
+
+  <div class="drop" id="drop">
+    Drop a WAV file here or click to choose one
+    <input id="file" type="file" accept=".wav,audio/wav,audio/x-wav">
+  </div>
+
+  <div class="controls">
+    <label>Width
+      <select id="width">
+        <option value="1080">1080 px</option>
+        <option value="1920">1920 px</option>
+      </select>
+    </label>
+
+    <label>Height
+      <input id="height" type="number" min="1" max="10000" value="600">
+    </label>
+
+    <label>Method
+      <select id="method">
+        <option value="minmax">Min / max waveform</option>
+        <option value="rms">RMS envelope</option>
+        <option value="peak">Peak envelope</option>
+        <option value="line">Center-line waveform</option>
+      </select>
+    </label>
+
+    <label>Background
+      <select id="background">
+        <option value="#000000">Black</option>
+        <option value="#ffffff">White</option>
+        <option value="custom">Custom</option>
+      </select>
+    </label>
+
+    <label>Waveform color
+      <input id="waveColor" type="color" value="#ffffff">
+    </label>
+
+    <label>Custom background
+      <input id="bgColor" type="color" value="#000000">
+    </label>
+
+    <label>Line thickness
+      <input id="thickness" type="number" min="1" max="30" step="0.5" value="1">
+    </label>
+
+    <label>Padding
+      <input id="padding" type="number" min="0" max="500" value="0">
+    </label>
+
+    <div class="checks">
+      <label style="flex-direction:row;align-items:center">
+        <input id="antialias" type="checkbox" checked>
+        antialias
+      </label>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="render" disabled>Render</button>
+    <button id="downloadAll" disabled>Download all PNGs</button>
+    <button id="reset">Reset options</button>
+  </div>
+
+  <div class="status" id="status">No audio loaded.</div>
+  <div class="results" id="results"></div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const els = {
+    file:$('file'), drop:$('drop'), width:$('width'), height:$('height'),
+    method:$('method'), background:$('background'), waveColor:$('waveColor'),
+    bgColor:$('bgColor'), thickness:$('thickness'), padding:$('padding'),
+    antialias:$('antialias'), render:$('render'), downloadAll:$('downloadAll'),
+    reset:$('reset'), status:$('status'), results:$('results')
+  };
+
+  let audioBuffer = null;
+  let rendered = [];
+
+  const defaults = {
+    width:'1080', height:'600', method:'minmax', background:'#000000',
+    waveColor:'#ffffff', bgColor:'#000000', thickness:'1', padding:'0',
+    antialias:true
+  };
+
+  function saveOptions() {
+    const data = {
+      width:els.width.value, height:els.height.value, method:els.method.value,
+      background:els.background.value, waveColor:els.waveColor.value,
+      bgColor:els.bgColor.value, thickness:els.thickness.value,
+      padding:els.padding.value, antialias:els.antialias.checked
+    };
+    localStorage.setItem('wav-waveform-options', JSON.stringify(data));
+  }
+
+  function loadOptions() {
+    try {
+      const d = JSON.parse(localStorage.getItem('wav-waveform-options') || 'null');
+      if (!d) return;
+      for (const [k,v] of Object.entries(d)) {
+        if (k === 'antialias') els.antialias.checked = !!v;
+        else if (els[k]) els[k].value = v;
+      }
+    } catch {}
+  }
+
+  function resetOptions() {
+    els.width.value=defaults.width; els.height.value=defaults.height;
+    els.method.value=defaults.method; els.background.value=defaults.background;
+    els.waveColor.value=defaults.waveColor; els.bgColor.value=defaults.bgColor;
+    els.thickness.value=defaults.thickness; els.padding.value=defaults.padding;
+    els.antialias.checked=defaults.antialias;
+    saveOptions();
+    if (audioBuffer) renderAll();
+  }
+
+  function getBackground() {
+    return els.background.value === 'custom' ? els.bgColor.value : els.background.value;
+  }
+
+  function sampleRange(data, start, end) {
+    start = Math.max(0, Math.floor(start));
+    end = Math.min(data.length, Math.ceil(end));
+    if (end <= start) end = Math.min(data.length, start + 1);
+    let min=1, max=-1, sum=0, peak=0;
+    for (let i=start;i<end;i++) {
+      const v=data[i];
+      if (v<min) min=v;
+      if (v>max) max=v;
+      sum += v*v;
+      const a=Math.abs(v); if (a>peak) peak=a;
+    }
+    return {min,max,rms:Math.sqrt(sum/(end-start)),peak};
+  }
+
+  function drawWaveform(canvas, data) {
+    const w=Number(els.width.value), h=Number(els.height.value);
+    const pad=Math.max(0,Number(els.padding.value)||0);
+    const bg=getBackground(), color=els.waveColor.value;
+    canvas.width=w; canvas.height=h;
+    const ctx=canvas.getContext('2d');
+    ctx.imageSmoothingEnabled=els.antialias.checked;
+    ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
+    ctx.strokeStyle=color; ctx.fillStyle=color;
+    ctx.lineWidth=Math.max(1,Number(els.thickness.value)||1);
+    ctx.lineCap='butt'; ctx.lineJoin='round';
+
+    const top=pad, bottom=Math.max(top+1,h-pad);
+    const center=(top+bottom)/2, half=(bottom-top)/2;
+    const bins=Math.max(1,w-2*pad);
+    const method=els.method.value;
+
+    if (method === 'line') {
+      ctx.beginPath();
+      for (let x=0;x<bins;x++) {
+        const pos=x/(bins-1||1)*(data.length-1);
+        const i=Math.floor(pos);
+        const frac=pos-i;
+        const v=data[i]*(1-frac)+(data[Math.min(data.length-1,i+1)]||0)*frac;
+        const px=pad+x, py=center-v*half;
+        if (x===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+      }
+      ctx.stroke();
+      return;
+    }
+
+    ctx.beginPath();
+    for (let x=0;x<bins;x++) {
+      const a=sampleRange(data, x/bins*data.length, (x+1)/bins*data.length);
+      let magnitude, minV, maxV;
+      if (method==='rms') {
+        magnitude=a.rms; minV=-magnitude; maxV=magnitude;
+      } else if (method==='peak') {
+        magnitude=a.peak; minV=-magnitude; maxV=magnitude;
+      } else {
+        minV=a.min; maxV=a.max;
+      }
+      const px=pad+x;
+      const y1=center-maxV*half, y2=center-minV*half;
+      if (x===0) ctx.moveTo(px,y1); else ctx.lineTo(px,y1);
+      ctx.lineTo(px,y2);
+    }
+    ctx.stroke();
+  }
+
+  function renderAll() {
+    if (!audioBuffer) return;
+    saveOptions();
+    rendered=[];
+    els.results.innerHTML='';
+    const count=Math.min(2,audioBuffer.numberOfChannels);
+    for (let ch=0; ch<count; ch++) {
+      const canvas=document.createElement('canvas');
+      drawWaveform(canvas,audioBuffer.getChannelData(ch));
+      const box=document.createElement('section');
+      box.className='channel';
+      const head=document.createElement('div');
+      head.className='channel-head';
+      head.innerHTML=`<div><div class="channel-title">Channel ${ch+1}</div><div class="small">${canvas.width} × ${canvas.height}px</div></div>`;
+      const btn=document.createElement('button');
+      btn.textContent='Download PNG';
+      btn.onclick=()=>downloadCanvas(canvas, `waveform-channel-${ch+1}.png`);
+      head.appendChild(btn);
+      box.appendChild(head); box.appendChild(canvas);
+      els.results.appendChild(box);
+      rendered.push({canvas,ch});
+    }
+    els.downloadAll.disabled=rendered.length===0;
+    els.status.textContent=`Rendered ${count} channel${count===1?'':'s'} from ${audioBuffer.sampleRate.toLocaleString()} Hz audio.`;
+  }
+
+  function downloadCanvas(canvas,name) {
+    const a=document.createElement('a');
+    a.download=name; a.href=canvas.toDataURL('image/png'); a.click();
+  }
+
+  els.downloadAll.onclick=()=>{
+    rendered.forEach(({canvas,ch})=>downloadCanvas(canvas,`waveform-channel-${ch+1}.png`));
+  };
+
+  async function loadFile(file) {
+    if (!file) return;
+    try {
+      els.status.textContent='Decoding audio...';
+      const buf=await file.arrayBuffer();
+      const AC=window.AudioContext||window.webkitAudioContext;
+      const ac=new AC();
+      audioBuffer=await ac.decodeAudioData(buf.slice(0));
+      await ac.close();
+      els.render.disabled=false;
+      renderAll();
+    } catch (e) {
+      audioBuffer=null; els.render.disabled=true;
+      els.status.textContent='Could not decode this file. Use an uncompressed PCM WAV.';
+      console.error(e);
+    }
+  }
+
+  els.file.onchange=e=>loadFile(e.target.files[0]);
+  els.drop.onclick=()=>els.file.click();
+  els.drop.ondragover=e=>{e.preventDefault();els.drop.classList.add('drag');};
+  els.drop.ondragleave=()=>els.drop.classList.remove('drag');
+  els.drop.ondrop=e=>{
+    e.preventDefault(); els.drop.classList.remove('drag');
+    loadFile(e.dataTransfer.files[0]);
+  };
+
+  ['width','height','method','background','waveColor','bgColor','thickness','padding','antialias']
+    .forEach(id=>els[id].addEventListener('change',()=>{saveOptions(); if(audioBuffer) renderAll();}));
+  els.render.onclick=renderAll;
+  els.reset.onclick=resetOptions;
+
+  loadOptions();
+})();
+</script>
+</body>
+</html>
